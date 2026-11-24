@@ -1,0 +1,1 @@
+import{l as r,j as s,c as t}from"./index-BkBa19TA.js";const c=({status:e})=>{if(!e)return null;const a=r[e.toUpperCase()]||"secondary";return s.jsx(t,{bg:a,className:"status-badge text-uppercase",children:e.replace(/_/g," ")})};export{c as S};

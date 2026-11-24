@@ -1,0 +1,48 @@
+package com.infy.scm360.common.correlation;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.slf4j.MDC;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
+import org.springframework.stereotype.Component;
+import org.springframework.web.filter.OncePerRequestFilter;
+
+import java.io.IOException;
+import java.util.UUID;
+
+@Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
+public class CorrelationIdFilter extends OncePerRequestFilter {
+
+    @Value("${spring.application.name:scm360-service}")
+    private String applicationName;
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+            throws ServletException, IOException {
+        String correlationId = request.getHeader(CorrelationContext.CORRELATION_ID_HEADER);
+        if (correlationId == null || correlationId.trim().isEmpty()) {
+            correlationId = UUID.randomUUID().toString();
+        }
+
+        String userId = request.getHeader(CorrelationContext.USER_ID_HEADER);
+
+        MDC.put(CorrelationContext.MDC_CORRELATION_ID, correlationId);
+        MDC.put(CorrelationContext.MDC_SERVICE, applicationName);
+        if (userId != null && !userId.isBlank()) {
+            MDC.put(CorrelationContext.MDC_USER_ID, userId);
+        }
+
+        response.setHeader(CorrelationContext.CORRELATION_ID_HEADER, correlationId);
+
+        try {
+            filterChain.doFilter(request, response);
+        } finally {
+            MDC.clear();
+        }
+    }
+}

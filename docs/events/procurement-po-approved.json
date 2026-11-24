@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PoApprovedEvent",
+  "type": "object",
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string", "enum": ["procurement.po.approved"] },
+    "sourceService": { "type": "string", "enum": ["procurement-service"] },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "poId": { "type": "string", "format": "uuid" },
+        "poNumber": { "type": "string" },
+        "supplierId": { "type": "string" },
+        "warehouseId": { "type": "string" },
+        "totalAmount": { "type": "number", "minimum": 0 },
+        "approvedBy": { "type": "string" }
+      },
+      "required": ["poId", "poNumber", "supplierId", "warehouseId", "totalAmount"]
+    }
+  },
+  "required": ["eventId", "eventType", "sourceService", "occurredAt", "correlationId", "payload"]
+}

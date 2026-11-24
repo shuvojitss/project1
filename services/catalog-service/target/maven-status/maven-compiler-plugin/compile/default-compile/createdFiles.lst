@@ -1,0 +1,13 @@
+com\infy\scm360\catalog\repository\ProductRepository.class
+com\infy\scm360\catalog\dto\UpdateProductRequest.class
+com\infy\scm360\catalog\domain\Product.class
+com\infy\scm360\catalog\CatalogServiceApplication.class
+com\infy\scm360\catalog\dto\CreateProductRequest.class
+com\infy\scm360\catalog\controller\CategoryController.class
+com\infy\scm360\catalog\repository\CategoryRepository.class
+com\infy\scm360\catalog\service\CategoryService.class
+com\infy\scm360\catalog\domain\Category.class
+com\infy\scm360\catalog\dto\CategoryDto.class
+com\infy\scm360\catalog\dto\ProductDto.class
+com\infy\scm360\catalog\controller\ProductController.class
+com\infy\scm360\catalog\service\ProductService.class

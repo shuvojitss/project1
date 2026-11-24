@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: com.infy.scm360.procurement.ProcurementServiceApplicationTests
+-------------------------------------------------------------------------------
+Tests run: 3, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 12.33 s -- in com.infy.scm360.procurement.ProcurementServiceApplicationTests

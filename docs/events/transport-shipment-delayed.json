@@ -1,0 +1,25 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ShipmentDelayedEvent",
+  "type": "object",
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string", "enum": ["transport.shipment.delayed"] },
+    "sourceService": { "type": "string", "enum": ["transportation-service"] },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "shipmentId": { "type": "string", "format": "uuid" },
+        "shipmentNumber": { "type": "string" },
+        "trackingNumber": { "type": "string" },
+        "carrierId": { "type": "string" },
+        "revisedEta": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string" }
+      },
+      "required": ["shipmentId", "shipmentNumber", "trackingNumber", "carrierId", "reason"]
+    }
+  },
+  "required": ["eventId", "eventType", "sourceService", "occurredAt", "correlationId", "payload"]
+}

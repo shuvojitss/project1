@@ -1,0 +1,527 @@
+<USER_REQUEST>
+# Infy_SupplyChain360 — Enterprise Build Specification
+
+This document is a single, continuously numbered build guide. Read and implement it in order. Items 1–10 fix the rules, items 11–40 define the backend, items 41–58 define the frontend, data, messaging, quality and operations, and items 59–75 give the implementation roadmap and acceptance checks. Every item is a binding requirement unless it says "optional".
+
+1. **Product vision.** Infy_SupplyChain360 is an end-to-end supply chain platform giving visibility and control over procurement, inventory, supplier collaboration, warehouse operations, order fulfilment and distribution across geographically distributed locations. Goals: reduce operational inefficiency, raise inventory accuracy, optimise logistics cost and lead time, and improve resilience when a supplier, warehouse or carrier fails.
+
+2. **Locked technology stack.** Nothing outside this list may be introduced.
+    - Frontend: React 18, TypeScript 5 (strict mode), Bootstrap 5 (via `react-bootstrap` and `bootstrap`), Vite as build tool.
+    - Frontend supporting libraries (only these): `react-router-dom`, `axios`, `recharts` (charts).
+    - Backend: Java 17, Spring Boot 3.x per service, with Spring Web, Spring Data JPA, Spring Security, Spring AMQP, Spring Validation, Spring Boot Actuator, Spring Cloud Gateway, Spring Cloud Netflix Eureka, Spring Cloud OpenFeign, Resilience4j, Flyway, springdoc-openapi, Spring Mail.
+    - Database: MySQL 8 (InnoDB, utf8mb4).
+    - Messaging: RabbitMQ 3.13 (AMQP 0-9-1).
+    - Build tooling (not runtime stack): Maven, plus plain shell scripts for local startup. Services run directly from executable JARs, with no containers.
+    - Test tooling: JUnit 5, Mockito, Vitest, React Testing Library. Integration tests run against a locally installed MySQL 8 and RabbitMQ (dedicated `_test` schemas and the `scm360_test` vhost).
+    - Explicitly forbidden: Docker or any container tooling (including Docker Compose and Testcontainers), Kafka, Redis, MongoDB, Elasticsearch, GraphQL, gRPC, any other UI kit (MUI, Ant Design, Tailwind), any other message broker or database.
+
+3. **Non-negotiable microservice rules.**
+    - One service = one bounded context = one Spring Boot application = one independently deployable unit = one MySQL schema with its own credentials.
+    - No shared database, no cross-schema joins, no foreign keys across services. Services reference each other's data by UUID only.
+    - No shared domain libraries or shared JPA entities. The only permitted shared artifact is `scm360-common-starter`, a Spring Boot starter containing cross-cutting code only (JWT filter, correlation-ID filter, error format, event envelope class, outbox base classes). It must contain zero business logic.
+    - The browser talks only to the API Gateway. Services never expose ports to the browser directly.
+    - State changes propagate between services through RabbitMQ events. Synchronous REST between services is allowed only for read queries that need an immediate answer, must go through OpenFeign with timeout and circuit breaker, and must have a documented fallback.
+    - Each service keeps small local reference copies (for example `product_ref`, `supplier_ref`, `warehouse_ref`) updated by events, so it can run when other services are down.
+    - Every service must build, test, start and deploy on its own.
+
+4. **High-level architecture.**
+```text
+ React + TS + Bootstrap SPA
+            |  HTTPS (JWT)
+            v
+     +-------------+        +-------------------+
+     | API Gateway |<------>| Discovery (Eureka)|
+     +------+------+        +-------------------+
+            | REST (lb://service-name)
+   +--------+--------+---------+---------+---------+---------+--------+
+   |        |        |         |         |         |         |        |
+ identity catalog supplier procurement inventory warehouse  order  transport
+   |        |        |         |         |         |         |        |
+  DB       DB       DB        DB        DB        DB        DB       DB
+   \________\________\_________\____ RabbitMQ (topic exchanges) ____/
+                                   |                    |
+                             analytics-service    notification-service
+                                   |                    |
+                                  DB                   DB
+```
+
+5. **Service catalogue.**
+
+    | Service | Port | MySQL schema | Responsibility |
+    |---|---|---|---|
+    | discovery-server | 8761 | none | Eureka service registry |
+    | api-gateway | 8080 | none | Single entry, routing, JWT validation, CORS, correlation ID |
+    | identity-service | 8081 | scm_identity | Users, roles, JWT, refresh tokens, location scoping |
+    | catalog-service | 8082 | scm_catalog | Product master data, categories, units of measure |
+    | supplier-service | 8083 | scm_supplier | Vendor onboarding, contracts, scorecards, supplier portal APIs |
+    | procurement-service | 8084 | scm_procurement | Requisitions, purchase orders, approvals, receipt matching |
+    | inventory-service | 8085 | scm_inventory | Stock levels, stock ledger, reservations, reorder rules |
+    | warehouse-service | 8086 | scm_warehouse | Warehouses, bins, inbound, putaway, pick/pack, transfers, cycle counts |
+    | order-service | 8087 | scm_order | Customer orders, fulfilment state machine, saga coordination |
+    | transportation-service | 8088 | scm_transport | Carriers, shipment planning, routes, tracking, proof of delivery |
+    | analytics-service | 8089 | scm_analytics | Event-fed read models, KPI aggregation, dashboard APIs |
+    | notification-service | 8090 | scm_notification | In-app notifications (SSE) and email alerts |
+
+6. **Repository layout (monorepo, independent modules).**
+```text
+infy-supplychain360/
+├── pom.xml                      # parent POM (dependency management only)
+├── scripts/                     # init-mysql.sql, rabbitmq-setup.sh, start-all.sh, stop-all.sh
+├── scm360-common-starter/
+├── discovery-server/
+├── api-gateway/
+├── services/
+│   ├── identity-service/
+│   ├── catalog-service/
+│   ├── supplier-service/
+│   ├── procurement-service/
+│   ├── inventory-service/
+│   ├── warehouse-service/
+│   ├── order-service/
+│   ├── transportation-service/
+│   ├── analytics-service/
+│   └── notification-service/
+├── frontend/                    # React + TS + Bootstrap SPA
+└── docs/                        # ADRs, OpenAPI exports, event contracts
+```
+
+7. **Internal package layout for every service** (base package `com.infy.scm360.<service>`): `controller`, `service`, `domain` (entities, enums, state machines), `repository`, `messaging` (publishers, listeners, outbox), `client` (Feign), `config`, `dto`, `mapper`, `exception`. Controllers contain no business logic, entities are never returned from controllers, DTOs are Java records, and all business rules live in `service` and `domain`.
+
+8. **Naming conventions.** Services: `kebab-case`. Java: standard conventions. REST paths: `/api/v1/<plural-noun>`. Tables: `snake_case` plural. Exchanges: `<domain>.events`. Routing keys: `<domain>.<entity>.<past-tense-verb>` (for example `inventory.stock.reserved`). Queues: `<consumer-service>.<producer-domain>.<purpose>`. Branches: `feature/<service>-<topic>`. Commits: Conventional Commits.
+
+9. **Identity service.**
+    - Entities: `users`, `roles`, `user_roles`, `user_locations` (which warehouses/regions a user may act on), `refresh_tokens`, `audit_log`.
+    - Endpoints: `POST /api/v1/auth/login`, `POST /api/v1/auth/refresh`, `POST /api/v1/auth/logout`, `GET /api/v1/users/me`, CRUD on `/api/v1/users` (ADMIN only), `PUT /api/v1/users/{id}/roles`, `PUT /api/v1/users/{id}/locations`.
+    - Passwords hashed with BCrypt (strength 12). Access token JWT lifetime 15 minutes, refresh token 7 days, rotated on every use and revocable.
+    - JWT claims: `sub` (user UUID), `roles`, `locationIds`, `supplierId` (only for supplier users), `iat`, `exp`. Sign with RS256; identity holds the private key, all other services hold only the public key.
+    - Account lockout after 5 failed logins for 15 minutes. Every login, role change and lockout is written to `audit_log`.
+
+10. **Role matrix.**
+
+    | Role | Scope |
+    |---|---|
+    | ADMIN | Users, roles, configuration, all read access |
+    | PROCUREMENT_MANAGER | Approve requisitions and POs, manage suppliers, view supplier performance |
+    | PROCUREMENT_OFFICER | Create requisitions and POs, manage supplier records |
+    | WAREHOUSE_MANAGER | Warehouse configuration, adjustments approval, transfers, cycle counts |
+    | WAREHOUSE_OPERATOR | Receive, putaway, pick, pack, count |
+    | LOGISTICS_PLANNER | Plan shipments, assign carriers, monitor delivery |
+    | SALES_COORDINATOR | Create and manage customer orders |
+    | SUPPLIER_USER | Supplier portal only: own POs, acknowledgements, ASN, own scorecard |
+    | EXECUTIVE | Read-only dashboards and analytics |
+
+11. **API Gateway.**
+    - Spring Cloud Gateway with routes `lb://<service-name>` for each service under `/api/v1/**`, path-prefix mapped (for example `/api/v1/orders/**` to order-service).
+    - Validates the JWT signature and expiry, rejects unauthenticated requests except `/api/v1/auth/login` and `/api/v1/auth/refresh`, then forwards `X-User-Id`, `X-User-Roles`, `X-Location-Ids` and `X-Correlation-Id` (generated if absent).
+    - Downstream services must still validate the JWT themselves via the common starter (defence in depth). Headers are convenience only and never the sole trust source.
+    - Configure CORS for the frontend origin only. Add a global fallback response (503 with the standard error body) when a route's circuit breaker is open.
+
+12. **Discovery server.** Spring Cloud Netflix Eureka server in standalone mode for development. Every service registers with its `spring.application.name`. Health checks use Actuator `/actuator/health`.
+
+13. **Catalog service.**
+    - Entities: `product` (sku unique, name, description, category_id, uom, weight, dimensions, unit_cost, status, version), `category` (tree via `parent_id`), `unit_of_measure`.
+    - Endpoints: CRUD under `/api/v1/products` and `/api/v1/categories`, search by sku/name/category with pagination.
+    - Events published: `catalog.product.created`, `catalog.product.updated`, `catalog.product.discontinued`. Inventory, procurement, warehouse and order services keep `product_ref` copies.
+
+14. **Supplier service.**
+    - Entities: `supplier` (code, legal_name, tax_id, status: PENDING, APPROVED, SUSPENDED, BLACKLISTED), `supplier_contact`, `supplier_document` (metadata only, file stored on local disk volume with path in DB), `supplier_contract`, `supplier_item` (product reference, lead time, price, MOQ), `supplier_scorecard`, `asn` (advance shipment notice) and `asn_line`.
+    - Onboarding workflow: submit, document check, risk review, approval by PROCUREMENT_MANAGER. Approval creates a SUPPLIER_USER invitation via event to identity-service.
+    - Scorecard computed from events: on-time delivery rate, quality (rejected quantity ratio), lead-time variance, responsiveness (PO acknowledgement time). Recalculated on every `warehouse.goods.received` event. Score 0–100 with configurable weights.
+    - Supplier portal endpoints (role SUPPLIER_USER, data limited to own `supplierId` claim): view POs, acknowledge or reject PO, submit ASN, view own scorecard.
+    - Events published: `supplier.approved`, `supplier.suspended`, `supplier.scorecard.updated`, `supplier.po.acknowledged`, `supplier.asn.submitted`.
+
+15. **Procurement service.**
+    - Entities: `requisition`, `requisition_line`, `purchase_order`, `po_line`, `approval_step`, `goods_receipt_ref` (local copy of received quantities), `po_status_history`.
+    - PO state machine: `DRAFT -> PENDING_APPROVAL -> APPROVED -> ISSUED -> ACKNOWLEDGED -> PARTIALLY_RECEIVED -> RECEIVED -> CLOSED`, with `REJECTED` and `CANCELLED` as terminal branches. Illegal transitions throw a domain exception mapped to HTTP 409.
+    - Approval rule table `approval_rule` (amount thresholds mapped to role), for example up to 50,000 by PROCUREMENT_MANAGER and above that requires two approvals. Rules are data, not code.
+    - Auto-requisition: consumes `inventory.stock.low` and drafts a requisition using the preferred supplier from `supplier_item_ref`.
+    - Receipt matching: on `warehouse.goods.received`, update received quantities, move PO status, flag over- and under-delivery beyond tolerance (default 5%).
+    - Events published: `procurement.requisition.created`, `procurement.po.approved`, `procurement.po.issued`, `procurement.po.cancelled`, `procurement.po.closed`.
+
+16. **Inventory service.**
+    - Entities: `stock_level` (product_id, warehouse_id, bin_id nullable, on_hand, reserved, available as computed, version), `stock_ledger` (immutable, append-only: movement_type, quantity_delta, reference_type, reference_id, occurred_at), `reservation`, `reorder_rule` (min, max, reorder_point, safety_stock, preferred_supplier_id), `stock_adjustment` (reason, approval).
+    - Every change to `stock_level` is written together with a `stock_ledger` row in one transaction. `stock_level` is a projection of the ledger and must be reproducible from it.
+    - Concurrency: optimistic locking via `@Version` with bounded retry, plus a conditional update (`UPDATE ... SET reserved = reserved + ? WHERE available >= ?`) so reservations can never oversell.
+    - Reservation lifecycle: `RESERVED -> COMMITTED` or `RELEASED` (cancel or timeout after configurable TTL, default 24 h, released by a scheduled job).
+    - Low-stock check after each movement: if `available <= reorder_point` publish `inventory.stock.low` (debounced to once per product and warehouse per 24 h).
+    - Events published: `inventory.stock.changed`, `inventory.stock.low`, `inventory.stock.reserved`, `inventory.reservation.failed`, `inventory.reservation.released`, `inventory.stock.adjusted`.
+
+17. **Warehouse service.**
+    - Entities: `warehouse` (code, name, region, address, capacity), `zone`, `bin`, `inbound_receipt`, `receipt_line`, `putaway_task`, `pick_list`, `pick_line`, `pack_task`, `transfer_order`, `cycle_count`, `cycle_count_line`.
+    - Inbound flow: expected receipts are created from `procurement.po.issued` and `supplier.asn.submitted`. Operator receives (with accepted, rejected and damaged quantities), the system generates putaway tasks to suggested bins (rule: same product bin first, then free bin in the right zone).
+    - Outbound flow: on `order.confirmed` generate a pick list (FIFO by receipt date, optional FEFO when expiry exists), then pack task, then publish `warehouse.order.packed`.
+    - Transfers between warehouses: `DRAFT -> DISPATCHED -> IN_TRANSIT -> RECEIVED`, with inventory moves triggered by events.
+    - Cycle counts: manager creates a count, operators submit counted quantities, variance above threshold goes to approval, approval publishes `warehouse.count.variance.approved` which inventory turns into an adjustment.
+    - Events published: `warehouse.goods.received`, `warehouse.putaway.completed`, `warehouse.order.picked`, `warehouse.order.packed`, `warehouse.transfer.dispatched`, `warehouse.transfer.received`, `warehouse.count.variance.approved`.
+
+18. **Order service.**
+    - Entities: `customer_order`, `order_line`, `order_status_history`, `customer_ref` (name, ship-to address, customer is a simple embedded concept here, no separate CRM service), `backorder`.
+    - Order state machine: `CREATED -> RESERVING -> CONFIRMED -> PICKING -> PACKED -> SHIPPED -> DELIVERED`, plus `BACKORDERED`, `REJECTED`, `CANCELLED`. Cancellation allowed until `PACKED`.
+    - Order service is the saga coordinator for fulfilment (see item 52). It owns order status only; stock, picking and shipment data stay in their own services.
+    - Endpoints: `POST /api/v1/orders`, `GET /api/v1/orders`, `GET /api/v1/orders/{id}`, `POST /api/v1/orders/{id}/cancel`, `GET /api/v1/orders/{id}/timeline`.
+    - Events published: `order.placed`, `order.confirmed`, `order.backordered`, `order.cancelled`, `order.shipped`, `order.delivered`.
+
+19. **Transportation service.**
+    - Entities: `carrier` (name, modes, service levels, rate card), `rate_card_entry` (origin region, destination region, mode, rate per kg, per km, minimum), `shipment`, `shipment_leg`, `shipment_item`, `tracking_event`, `proof_of_delivery`, `vehicle` (optional), `route_plan`.
+    - Shipment state machine: `PLANNED -> ASSIGNED -> DISPATCHED -> IN_TRANSIT -> DELIVERED`, plus `DELAYED`, `FAILED_DELIVERY`, `CANCELLED`.
+    - Planning: on `warehouse.order.packed` create a shipment; planner (or auto-rule) selects carrier by lowest cost meeting required delivery date using `rate_card_entry`. Consolidation of shipments with same origin, destination region and date is supported.
+    - Tracking: planners or carrier users post `tracking_event`s; ETA breach marks shipment `DELAYED` via a scheduled job.
+    - Events published: `transport.shipment.created`, `transport.shipment.dispatched`, `transport.shipment.delayed`, `transport.shipment.delivered`, `transport.delivery.failed`.
+
+20. **Analytics service.**
+    - Consumes events from every domain and maintains denormalised read models in `scm_analytics` (for example `fact_order`, `fact_po`, `fact_receipt`, `fact_shipment`, `fact_stock_snapshot`, `dim_product`, `dim_supplier`, `dim_warehouse`, `dim_date`). It never calls other services and never writes back to them.
+    - Daily snapshot job stores end-of-day stock per product and warehouse.
+    - Dashboard endpoints (all accept `from`, `to`, `warehouseId`, `region` filters): `/api/v1/analytics/kpis`, `/inventory`, `/procurement`, `/suppliers`, `/fulfilment`, `/logistics`.
+    - KPI definitions (implement exactly): inventory accuracy = 1 minus absolute count variance divided by counted quantity; stock turnover = cost of goods shipped divided by average inventory value; days of inventory on hand; fill rate = lines fully shipped from first reservation divided by total lines; OTIF = orders delivered on time and in full divided by orders delivered; supplier on-time rate; PO cycle time (created to approved, approved to received); order cycle time (placed to delivered); transport cost per shipment and per kg; warehouse utilisation = used bins divided by total bins; stockout count; backorder rate.
+    - Events are idempotent upserts so replaying a queue rebuilds the read models.
+
+21. **Notification service.**
+    - Consumes alert-worthy events (low stock, PO approval needed, PO issued to supplier, shipment delayed, delivery failed, cycle count variance, order backordered) and maps each to recipients by role and location using a local `recipient_rule` table.
+    - Channels: in-app (stored in `notification`, pushed to the SPA by Server-Sent Events at `/api/v1/notifications/stream`) and email through Spring Mail (SMTP configured by environment variables; in the `dev` profile emails are written to the log instead of being sent).
+    - Endpoints: list, mark read, mark all read, unread count, user preferences per channel.
+
+22. **Database rules (all services).**
+    - Flyway migrations only (`db/migration/V<n>__<description>.sql`). `spring.jpa.hibernate.ddl-auto=validate` everywhere. Never edit an applied migration.
+    - Primary keys: UUID stored as `CHAR(36)`. Money: `DECIMAL(19,4)` plus a `currency` column (ISO 4217). Quantities: `DECIMAL(19,3)`. Timestamps: `DATETIME(6)` stored in UTC.
+    - Every table has `created_at`, `created_by`, `updated_at`, `updated_by`, and mutable aggregates have `version BIGINT` for optimistic locking.
+    - Soft delete (`deleted_at`) for master data. Transactional data is never deleted.
+    - Index every foreign-key-like column and every filter or sort column used by list endpoints. Add composite indexes that match real query patterns (for example `stock_level(product_id, warehouse_id)` unique).
+    - Use pagination (`page`, `size`, max 100) on every list endpoint. No unbounded queries.
+
+23. **Mandatory tables in every service that publishes or consumes events.**
+```sql
+CREATE TABLE outbox_event (
+  id            CHAR(36)     PRIMARY KEY,
+  aggregate_type VARCHAR(64) NOT NULL,
+  aggregate_id  CHAR(36)     NOT NULL,
+  exchange_name VARCHAR(100) NOT NULL,
+  routing_key   VARCHAR(150) NOT NULL,
+  payload       JSON         NOT NULL,
+  status        VARCHAR(16)  NOT NULL DEFAULT 'PENDING',  -- PENDING, SENT, FAILED
+  attempts      INT          NOT NULL DEFAULT 0,
+  created_at    DATETIME(6)  NOT NULL,
+  sent_at       DATETIME(6)  NULL,
+  KEY idx_outbox_status_created (status, created_at)
+);
+
+CREATE TABLE processed_message (
+  message_id   CHAR(36)    NOT NULL,
+  consumer     VARCHAR(100) NOT NULL,
+  processed_at DATETIME(6) NOT NULL,
+  PRIMARY KEY (message_id, consumer)
+);
+```
+
+24. **Inventory core tables (reference DDL).**
+```sql
+CREATE TABLE stock_level (
+  id           CHAR(36) PRIMARY KEY,
+  product_id   CHAR(36) NOT NULL,
+  warehouse_id CHAR(36) NOT NULL,
+  bin_id       CHAR(36) NULL,
+  on_hand      DECIMAL(19,3) NOT NULL DEFAULT 0,
+  reserved     DECIMAL(19,3) NOT NULL DEFAULT 0,
+  version      BIGINT NOT NULL DEFAULT 0,
+  updated_at   DATETIME(6) NOT NULL,
+  UNIQUE KEY uq_stock (product_id, warehouse_id, bin_id),
+  CONSTRAINT chk_non_negative CHECK (on_hand >= 0 AND reserved >= 0 AND reserved <= on_hand)
+);
+
+CREATE TABLE stock_ledger (
+  id             CHAR(36) PRIMARY KEY,
+  product_id     CHAR(36) NOT NULL,
+  warehouse_id   CHAR(36) NOT NULL,
+  movement_type  VARCHAR(32) NOT NULL,  -- RECEIPT, RESERVE, RELEASE, ISSUE, TRANSFER_OUT, TRANSFER_IN, ADJUSTMENT
+  quantity_delta DECIMAL(19,3) NOT NULL,
+  reference_type VARCHAR(32) NOT NULL,
+  reference_id   CHAR(36) NOT NULL,
+  occurred_at    DATETIME(6) NOT NULL,
+  KEY idx_ledger_product_wh (product_id, warehouse_id, occurred_at)
+);
+```
+
+25. **RabbitMQ topology.**
+    - One durable topic exchange per domain: `catalog.events`, `supplier.events`, `procurement.events`, `inventory.events`, `warehouse.events`, `order.events`, `transport.events`.
+    - One dead-letter exchange `scm.dlx` (direct). Every consumer queue declares `x-dead-letter-exchange=scm.dlx` and routes to a matching `<queue>.dlq`.
+    - Consumer queues are durable, one per consumer service and purpose, bound with specific routing keys (never `#` except in analytics-service, which binds `#` on each domain exchange).
+    - Publishers use publisher confirms and `mandatory` flag. Consumers use manual acknowledgement, prefetch 10–20, and concurrency 2–4.
+    - Retry: 3 attempts with exponential backoff (1 s, 5 s, 30 s) through Spring AMQP retry interceptor, then reject to the DLQ. A protected admin endpoint in each service can republish a DLQ message after the fix.
+    - Messages are persistent JSON with `content-type: application/json`. Queue and exchange declarations are done in code (`Declarables` beans) in each service for the queues it owns.
+
+26. **Event envelope (every message).**
+```json
+{
+  "eventId": "7d2c1f0e-5b1e-4a49-9c63-3f3b0b6a9b11",
+  "eventType": "inventory.stock.reserved",
+  "eventVersion": 1,
+  "occurredAt": "2026-11-23T09:15:30.123Z",
+  "producer": "inventory-service",
+  "correlationId": "c1f6c4de-1f0a-4a3a-8e7c-b6e0d5e0a111",
+  "causationId": "a8d1d6a0-...",
+  "payload": { }
+}
+```
+    Rules: `eventId` is a new UUID per event and the idempotency key. Payload changes must be backward compatible within a version (add fields only). Breaking changes publish a new `eventVersion` in parallel until all consumers migrate. Each event contract is documented in `docs/events/<eventType>.md`.
+
+27. **Event catalogue.**
+
+    | Event (routing key) | Producer | Consumers |
+    |---|---|---|
+    | catalog.product.created / updated / discontinued | catalog | inventory, procurement, warehouse, order, analytics |
+    | supplier.approved / suspended | supplier | procurement, identity, notification, analytics |
+    | supplier.po.acknowledged | supplier | procurement, notification |
+    | supplier.asn.submitted | supplier | warehouse, notification |
+    | supplier.scorecard.updated | supplier | analytics |
+    | procurement.po.approved | procurement | notification, analytics |
+    | procurement.po.issued | procurement | supplier, warehouse, analytics |
+    | procurement.po.cancelled / closed | procurement | supplier, warehouse, analytics |
+    | warehouse.goods.received | warehouse | inventory, procurement, supplier, analytics |
+    | warehouse.putaway.completed | warehouse | inventory, analytics |
+    | inventory.stock.low | inventory | procurement, notification |
+    | inventory.stock.changed | inventory | analytics |
+    | inventory.stock.reserved | inventory | order |
+    | inventory.reservation.failed | inventory | order, notification |
+    | inventory.stock.adjusted | inventory | analytics, notification |
+    | order.placed | order | inventory, analytics |
+    | order.confirmed | order | warehouse, analytics |
+    | order.cancelled | order | inventory, warehouse, transport, analytics |
+    | warehouse.order.picked | warehouse | inventory (commit reservation), order |
+    | warehouse.order.packed | warehouse | transport, order |
+    | transport.shipment.dispatched | transport | order, notification, analytics |
+    | transport.shipment.delayed | transport | order, notification, analytics |
+    | transport.shipment.delivered | transport | order, analytics |
+    | transport.delivery.failed | transport | order, notification, analytics |
+    | warehouse.transfer.dispatched / received | warehouse | inventory, analytics |
+    | warehouse.count.variance.approved | warehouse | inventory, analytics |
+
+28. **Transactional outbox implementation.** A service never publishes to RabbitMQ inside the business transaction. Instead: write the business change and an `outbox_event` row in the same MySQL transaction, then a scheduled relay (every 500 ms, batch 100, `SELECT ... FOR UPDATE SKIP LOCKED`) publishes pending rows with publisher confirms, marks them `SENT`, and increments `attempts` on failure (mark `FAILED` after 10 attempts and raise an alert metric). A cleanup job deletes `SENT` rows older than 7 days. This guarantees at-least-once delivery without distributed transactions.
+
+29. **Idempotent consumer implementation.** Every listener runs in one transaction that first inserts `(eventId, consumerName)` into `processed_message`. On duplicate-key the message is acknowledged and skipped. Otherwise the business logic runs and the transaction commits before the ack. Consumers must also tolerate out-of-order events (use `version` or `occurredAt` comparison before overwriting reference data).
+
+30. **Procure-to-stock flow.**
+    - Step 1: low stock detected by inventory, so `inventory.stock.low` is published.
+    - Step 2: procurement drafts a requisition, officer converts it to a PO, approval rules apply, `procurement.po.approved` and `procurement.po.issued` are published.
+    - Step 3: supplier acknowledges in the portal (`supplier.po.acknowledged`) and later submits an ASN.
+    - Step 4: warehouse receives goods against the expected receipt, publishes `warehouse.goods.received`.
+    - Step 5: inventory increases `on_hand` and writes ledger rows, procurement updates PO status, supplier updates scorecard, analytics updates facts.
+
+31. **Order-to-delivery flow.**
+    - Step 1: SALES_COORDINATOR creates an order, order-service stores `CREATED -> RESERVING` and emits `order.placed` through the outbox.
+    - Step 2: inventory reserves each line atomically. All lines reserved means `inventory.stock.reserved`, any line short means `inventory.reservation.failed` after releasing partial reservations.
+    - Step 3: order becomes `CONFIRMED` (publishes `order.confirmed`) or `BACKORDERED`.
+    - Step 4: warehouse creates the pick list, operators pick (`warehouse.order.picked`, inventory commits reservation to on-hand deduction) and pack (`warehouse.order.packed`).
+    - Step 5: transport creates a shipment, assigns a carrier, dispatches (`transport.shipment.dispatched`), order becomes `SHIPPED`.
+    - Step 6: delivery with proof of delivery publishes `transport.shipment.delivered`, order becomes `DELIVERED`.
+
+32. **Saga and compensation rules (choreography with order-service as owner of the business state).**
+    - Reservation failure: order moves to `BACKORDERED`, a `backorder` row is created, no stock stays reserved.
+    - Cancellation before pack: `order.cancelled` makes inventory release reservations, warehouse cancel open pick tasks, transport cancel planned shipments.
+    - Failed delivery: `transport.delivery.failed` moves the order to a `DELIVERY_EXCEPTION` flag for planner action, stock is not auto-returned until a return is processed.
+    - Reservation timeout: scheduled job releases expired reservations and publishes `inventory.reservation.released`, order-service reacts by moving the order to `BACKORDERED`.
+    - Every saga step is idempotent and every compensation is safe to run twice.
+
+33. **REST API standards.**
+    - Base path `/api/v1`. Resource nouns plural, HTTP verbs used correctly, `201` with `Location` on create, `204` on delete, `409` for state conflicts, `422` for validation, `404` for missing.
+    - List endpoints support `page`, `size`, `sort=field,asc|desc` and documented filters, and return `{ "content": [...], "page": 0, "size": 20, "totalElements": 0, "totalPages": 0 }`.
+    - Mutating endpoints that must be retry-safe (create order, create PO, receive goods) accept an `Idempotency-Key` header stored in an `idempotency_key` table per service.
+    - Every service exposes OpenAPI at `/v3/api-docs` and Swagger UI (dev profile only). Export specs to `docs/openapi/`.
+
+34. **Standard error body (RFC 7807 style, implemented once in the common starter).**
+```json
+{
+  "type": "https://scm360.infy/errors/insufficient-stock",
+  "title": "Insufficient stock",
+  "status": 409,
+  "detail": "Requested 50 of SKU-1001 but only 32 available at WH-BLR",
+  "instance": "/api/v1/orders",
+  "correlationId": "c1f6c4de-1f0a-4a3a-8e7c-b6e0d5e0a111",
+  "errors": [ { "field": "lines[0].quantity", "message": "exceeds available stock" } ],
+  "timestamp": "2026-11-23T09:15:30Z"
+}
+```
+
+35. **Security requirements.**
+    - Stateless JWT, RS256, validated in the gateway and again in each service. Method-level security with `@PreAuthorize("hasAnyRole(...)")` on every endpoint, deny by default.
+    - Location-based data scoping: warehouse, inventory, order and shipment queries must filter by `locationIds` from the token unless the user is ADMIN or EXECUTIVE. Supplier users are restricted by `supplierId`.
+    - Bean Validation on every request DTO, parameterised queries only (Spring Data), output encoding handled by React, file upload limits and content-type allow-list for supplier documents.
+    - No secrets in source control. Database passwords, JWT keys, SMTP credentials and RabbitMQ credentials come from environment variables. RabbitMQ uses one vhost `scm360` and one user per service with least-privilege permissions.
+    - Audit log entries for security-relevant and master-data changes (who, what, when, before and after).
+    - Security headers on the gateway: HSTS, `X-Content-Type-Options`, `X-Frame-Options`, a restrictive CSP for the SPA.
+
+36. **Resilience requirements.** Resilience4j on every Feign client and gateway route: connect timeout 2 s, read timeout 5 s, retry 2 with backoff for idempotent GETs only, circuit breaker (50% failure over 20 calls, 30 s open), bulkhead for expensive endpoints. Every circuit breaker has a documented fallback (for example the SPA shows cached "last known" data banner). Scheduled jobs must be safe to run on multiple instances (use `SELECT ... FOR UPDATE SKIP LOCKED` or a `job_lock` table).
+
+37. **Observability.**
+    - Spring Boot Actuator: `health` (liveness and readiness groups including DB and RabbitMQ), `info`, `metrics`.
+    - JSON structured logging with `correlationId`, `userId`, `service` in MDC on every line. The correlation ID is propagated through HTTP headers and RabbitMQ message headers.
+    - Business metrics via Micrometer counters (orders placed, reservations failed, outbox backlog, DLQ depth) exposed on Actuator.
+    - Operational runbook in `docs/runbook.md`: how to inspect the outbox backlog, replay a DLQ, rebuild analytics read models.
+
+38. **Configuration and environment.** Each service has `application.yml` plus `application-dev.yml`, `application-test.yml`, `application-prod.yml`. All environment-specific values come from environment variables.
+
+    | Variable | Purpose |
+    |---|---|
+    | `SPRING_DATASOURCE_URL`, `_USERNAME`, `_PASSWORD` | Service's own schema |
+    | `SPRING_RABBITMQ_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD`, `_VIRTUAL_HOST` | Broker access |
+    | `EUREKA_CLIENT_SERVICEURL_DEFAULTZONE` | Discovery address |
+    | `JWT_PUBLIC_KEY` / `JWT_PRIVATE_KEY` (identity only) | Token verification and signing |
+    | `SCM_CORS_ALLOWED_ORIGINS` | Gateway CORS |
+    | `SPRING_MAIL_HOST`, `_PORT`, `_USERNAME`, `_PASSWORD` | Notification service SMTP |
+
+39. **Local development setup (no containers).** Install MySQL 8 and RabbitMQ 3.13 natively on the developer machine, then run everything with Maven and Node.
+    - `scripts/init-mysql.sql` creates every schema plus a `_test` schema, and one dedicated user per service restricted to its own schemas:
+    ```sql
+    CREATE DATABASE scm_inventory       CHARACTER SET utf8mb4;
+    CREATE DATABASE scm_inventory_test  CHARACTER SET utf8mb4;
+    CREATE USER 'inventory_svc'@'localhost' IDENTIFIED BY '${INVENTORY_DB_PASSWORD}';
+    GRANT ALL PRIVILEGES ON scm_inventory.*      TO 'inventory_svc'@'localhost';
+    GRANT ALL PRIVILEGES ON scm_inventory_test.* TO 'inventory_svc'@'localhost';
+    -- repeat for identity, catalog, supplier, procurement, warehouse, order, transport, analytics, notification
+    ```
+    - `scripts/rabbitmq-setup.sh` enables the management plugin (UI on port 15672), creates vhosts `scm360` and `scm360_test`, and one user per service with least-privilege permissions:
+    ```bash
+    rabbitmq-plugins enable rabbitmq_management
+    rabbitmqctl add_vhost scm360
+    rabbitmqctl add_vhost scm360_test
+    rabbitmqctl add_user inventory_svc "$INVENTORY_MQ_PASSWORD"
+    rabbitmqctl set_permissions -p scm360 inventory_svc '^inventory\..*' '.*' '.*'
+    # repeat per service
+    ```
+    - `scripts/start-all.sh` loads a git-ignored `.env.local`, then starts, in order: discovery-server, identity-service, the remaining services, api-gateway. Each backend starts with `mvn -pl services/<name> spring-boot:run -Dspring-boot.run.profiles=dev`, and the script waits for `/actuator/health` to report `UP` before starting the next one. `scripts/stop-all.sh` stops them.
+    - Frontend: `cd frontend && npm install && npm run dev` (Vite dev server).
+
+40. **Per-service build checklist (apply to every service).** Spring Boot project with Actuator and Eureka client, Flyway baseline migration plus `outbox_event` and `processed_message`, security config using the common starter, global exception handler, OpenAPI config, RabbitMQ declarables, outbox relay, idempotent listeners, executable JAR build (`spring-boot-maven-plugin`) with a start script, unit and integration tests passing, `README.md` listing endpoints, events published and consumed.
+
+41. **Frontend architecture.** Vite + React 18 + TypeScript strict. Feature-based structure:
+```text
+frontend/src/
+├── app/            # App.tsx, router, providers, layout shell
+├── api/            # axios instance, interceptors, typed API clients per service
+├── auth/           # AuthContext, login page, ProtectedRoute, role guards
+├── components/     # shared UI: DataTable, FormField, StatusBadge, ConfirmModal, PageHeader, Toasts
+├── features/
+│   ├── dashboard/
+│   ├── catalog/
+│   ├── suppliers/
+│   ├── procurement/
+│   ├── inventory/
+│   ├── warehouse/
+│   ├── orders/
+│   ├── transportation/
+│   ├── analytics/
+│   ├── notifications/
+│   ├── users/
+│   └── supplier-portal/
+├── hooks/          # useAuth, usePagination, useDebounce, useSse
+├── types/          # shared TypeScript interfaces and enums mirroring API DTOs
+└── utils/          # formatters (currency, date, quantity), constants
+```
+
+42. **Frontend UI standards (Bootstrap 5 only).**
+    - Layout: fixed top navbar (brand, location selector, notification bell with unread badge, user menu), collapsible left sidebar whose menu items depend on role, content area using Bootstrap grid.
+    - Use `react-bootstrap` components: `Table`, `Form`, `Modal`, `Offcanvas`, `Badge`, `Alert`, `Toast`, `Tabs`, `Card`, `Pagination`, `Spinner`, `Breadcrumb`. Custom CSS is limited to one `theme.scss` overriding Bootstrap variables (brand colours, spacing).
+    - Status badges use a single shared mapping (for example PO `APPROVED` is `success`, `PENDING_APPROVAL` is `warning`, `REJECTED` is `danger`).
+    - Every list screen has search, filters, server-side pagination and sort, an empty state, a loading skeleton or spinner and an error alert with retry.
+    - Every form uses controlled components, inline validation messages mirroring backend validation, disabled submit while pending, and a toast on success or failure.
+    - Responsive from 360 px upward, keyboard accessible, ARIA labels on icon buttons, colour never the only status indicator.
+
+43. **Frontend API layer.** One axios instance with base URL from `VITE_API_BASE_URL`. Request interceptor attaches `Authorization: Bearer <accessToken>` and `X-Correlation-Id`. Response interceptor handles `401` by calling `/auth/refresh` once, queues concurrent requests during refresh, and redirects to login if refresh fails. Parse the standard error body into a typed `ApiError` and show `detail` in a toast. Keep access token in memory and the refresh token in an `HttpOnly` cookie where the gateway supports it, otherwise in `sessionStorage` with a documented risk note in `docs/adr/`. Each backend service has one typed client file under `src/api` with functions returning typed promises.
+
+44. **Frontend routing and access control.** `react-router-dom` v6 with lazy-loaded feature routes. `ProtectedRoute` checks authentication, `RoleRoute` checks allowed roles per route. Hide menu items and actions the user cannot use, but never rely on this for security because the backend enforces it. SUPPLIER_USER sees only the supplier portal shell (own POs, ASN, scorecard).
+
+45. **Frontend screens (minimum set).**
+    - Dashboard: KPI cards (OTIF, inventory accuracy, fill rate, open POs, low-stock items, delayed shipments), trend line charts, stock by warehouse bar chart, supplier score ranking, recent alerts.
+    - Catalog: product list, create and edit product, category tree.
+    - Suppliers: list, onboarding wizard, detail with contacts, documents, contracts, items and scorecard, suspend and reactivate.
+    - Procurement: requisition list and form, PO list and form, PO detail with approval timeline and receipt progress, approval inbox.
+    - Inventory: stock overview by warehouse and product, product ledger drill-down, adjustments with approval, reorder rules.
+    - Warehouse: warehouse and bin setup, inbound receiving screen, putaway tasks, pick lists, pack station, transfer orders, cycle counts.
+    - Orders: order list, order entry form with live availability hint, order detail with status timeline, cancel action.
+    - Transportation: carrier and rate cards, shipment planning board, shipment detail with tracking events and proof of delivery, delay list.
+    - Analytics: procurement, supplier, inventory, fulfilment and logistics dashboards with date and location filters and CSV export.
+    - Notifications: bell dropdown plus full notification centre, live updates via SSE.
+    - Admin: users, roles, locations, approval rules, audit log viewer.
+    - Supplier portal: assigned POs, acknowledge or reject, create ASN, scorecard.
+
+46. **Charts and real-time.** Use `recharts` only. Create reusable `KpiCard`, `TrendChart`, `BarBreakdown` and `DonutBreakdown` components so dashboards stay consistent. Notifications use an `EventSource` wrapper hook with automatic reconnect and a fallback to polling every 30 seconds. Other screens refresh on demand or with a manual refresh button; do not add WebSockets.
+
+47. **Frontend quality gates.** ESLint and Prettier with zero warnings, TypeScript `strict`, no `any` without a justification comment, Vitest unit tests for utilities and hooks, React Testing Library tests for forms, tables and role guards, minimum 70% line coverage on `components`, `hooks`, and `auth`.
+
+48. **Seed and demo data.** Provide `V999__seed_demo_data.sql` migrations active only under the `dev` profile (or an `ApplicationRunner` guarded by profile) that create: one user per role, 4 warehouses in different regions with zones and bins, 50 products in 5 categories, 8 suppliers (mixed statuses) with items and scorecards, 3 carriers with rate cards, opening stock, sample POs in several statuses, and sample orders. Seed data must be consistent across services (same UUIDs used in reference tables).
+
+49. **Testing strategy (backend).**
+    - Unit tests for domain logic: state machines, approval rules, reservation arithmetic, scorecard calculation, rate selection.
+    - Repository and integration tests against a real local MySQL test schema (`test` profile) so Flyway migrations are verified for real.
+    - Messaging tests against the local RabbitMQ test vhost: outbox relay publishes, listener is idempotent on duplicate delivery, DLQ receives after retries.
+    - Contract tests per event: JSON examples in `docs/events/` validated by both producer and consumer tests so schema drift fails the build.
+    - Concurrency test: 100 parallel reservations against stock of 50 must result in exactly 50 successes and no negative stock.
+    - End-to-end scenario test (separate profile) running the order-to-delivery and procure-to-stock flows across services through the gateway.
+    - Minimum 80% line coverage on `domain` and `service` packages.
+
+50. **CI pipeline (tool-agnostic stages).** Per service on change: compile, unit tests, integration tests, coverage check, package the executable JAR, scan dependencies. Frontend: install, lint, type-check, test, build. A nightly job starts all services from the built JARs against a test MySQL and RabbitMQ and runs the end-to-end scenarios. A broken event contract test blocks merge.
+
+51. **Performance targets.** P95 under 300 ms for read endpoints and under 500 ms for write endpoints at 100 concurrent users on the dev stack, order placement to `CONFIRMED` within 3 s under normal load, outbox publish delay under 2 s, dashboards served from pre-aggregated tables with P95 under 800 ms.
+
+52. **Data consistency rules to enforce in review.**
+    - Inventory is the only writer of stock quantities. Warehouse reports physical facts through events, it never edits stock tables.
+    - Order service is the only writer of order status. Others report facts, order reacts.
+    - A ledger row exists for every stock change and `SUM(quantity_delta)` per product and warehouse equals `stock_level.on_hand` (nightly reconciliation job reports mismatches as a metric and a notification).
+    - Reference copies are read-only in the consuming service and updated only from events.
+
+53. **Multi-location support.** Every operational record carries `warehouse_id` or `region` where relevant. Users act only inside assigned locations. Inter-warehouse transfers, regional carrier rate cards and per-location reorder rules are first-class. All timestamps are stored in UTC and displayed in the user's browser timezone.
+
+54. **Supply chain resilience features.** Multi-sourcing: `supplier_item` supports multiple suppliers per product with priority, auto-requisition falls back to the next supplier when the preferred one is `SUSPENDED`. Safety stock and reorder points per location. Supplier risk flag from scorecard drop below threshold. Delay alerts on shipments and late POs. Cross-warehouse stock visibility to suggest transfers when one location is short and another has surplus.
+
+55. **Documentation deliverables.** `README.md` (setup in under 10 minutes), `docs/architecture.md` (diagrams, bounded contexts), `docs/events/` (one file per event), `docs/openapi/` (exported specs), `docs/adr/` (decisions such as outbox, JWT approach, database-per-service), `docs/runbook.md`, `docs/er/` (per-service ER diagram), `docs/user-guide.md` (role-based walkthroughs).
+
+56. **Coding standards.** Constructor injection only, no field injection. Immutable DTOs (records). Domain exceptions mapped centrally. No business logic in controllers, listeners or entities' getters. No `System.out`. Methods under 40 lines, classes under 400 lines. Every public service method has a unit test. Pull requests need at least one review and a green pipeline.
+
+57. **Definition of done for any feature.** Code, migration, unit and integration tests, OpenAPI updated, events documented, role permissions enforced and tested, frontend screen with loading, empty and error states, audit entries for sensitive changes, README updated, no new warnings.
+
+58. **Explicitly out of scope** unless later approved: payments and invoicing, customer-facing storefront, EDI and third-party ERP connectors, barcode hardware integration, GPS device integration, mobile apps, multi-currency FX conversion, containers or Docker-based deployment, Kubernetes manifests.
+
+59. **Roadmap step 1: foundation.** Create the parent POM, `scm360-common-starter` (JWT filter, correlation ID, error handler, event envelope, outbox and idempotency base classes), discovery-server, api-gateway, the local MySQL and RabbitMQ setup scripts, and the frontend shell (login page, layout, router, axios layer). Exit check: gateway routes to a health endpoint of a stub service and the SPA loads.
+
+60. **Roadmap step 2: identity-service.** Users, roles, locations, login, refresh, lockout, audit log, seed users. Wire the frontend login, token refresh and role-based menu. Exit check: each seed role logs in and sees only its menu.
+
+61. **Roadmap step 3: catalog-service.** Products and categories with events. Frontend catalog screens. Exit check: creating a product publishes an event and the consumer services' `product_ref` tables update.
+
+62. **Roadmap step 4: supplier-service.** Onboarding workflow, items, contracts, documents, supplier portal APIs and screens, scorecard skeleton. Exit check: a supplier is onboarded, approved, and a portal user can log in.
+
+63. **Roadmap step 5: inventory-service.** Stock levels, ledger, reservations, reorder rules, adjustments. Include the concurrency test from item 49. Exit check: oversell is impossible under parallel load.
+
+64. **Roadmap step 6: warehouse-service.** Warehouses, bins, inbound receiving, putaway, transfers, cycle counts. Exit check: receiving goods increases stock in inventory through events only.
+
+65. **Roadmap step 7: procurement-service.** Requisitions, POs, approval rules, auto-requisition from low stock, receipt matching, supplier acknowledgements. Exit check: the full procure-to-stock flow (item 30) runs end to end and scorecard updates.
+
+66. **Roadmap step 8: order-service.** Orders, state machine, saga handling and compensation. Exit check: happy path reaches `CONFIRMED`, insufficient stock reaches `BACKORDERED` and leaves nothing reserved, cancellation releases stock.
+
+67. **Roadmap step 9: transportation-service.** Carriers, rate cards, shipments, tracking, proof of delivery, delay detection. Exit check: the full order-to-delivery flow (item 31) runs end to end.
+
+68. **Roadmap step 10: analytics-service.** Consumers for all domains, fact and dimension tables, daily snapshot, KPI endpoints, replay and rebuild tool. Exit check: dashboards match hand-computed figures on the seed data.
+
+69. **Roadmap step 11: notification-service.** Recipient rules, SSE stream, email, preferences. Exit check: a low-stock event produces an in-app notification to the right role within 5 seconds.
+
+70. **Roadmap step 12: frontend completion.** All screens of item 45, dashboards with charts, notification centre, supplier portal, admin screens, accessibility pass, frontend test coverage target.
+
+71. **Roadmap step 13: hardening.** Resilience4j tuning, security review against item 35, load test against item 51, DLQ and outbox runbook drills, kill-a-service chaos test (stop inventory-service during order placement and confirm messages queue and orders recover when it restarts).
+
+72. **Roadmap step 14: release readiness.** Documentation deliverables of item 55 complete, nightly E2E green for 5 consecutive runs, demo script covering both flows and a failure scenario, tagged release `v1.0.0`.
+
+73. **Acceptance criteria (system level).**
+    - Any single service can be stopped and restarted without data loss or duplicate processing.
+    - Messages are never lost (outbox plus confirms plus durable queues) and never applied twice (idempotent consumers).
+    - Stock can never go negative or be oversold, and ledger totals always reconcile.
+    - Every endpoint enforces role and location access, verified by automated tests.
+    - Each of the nine roles can complete its primary journey in the UI without developer help.
+    - Dashboards reflect events within 5 seconds of the source action under normal load.
+
+74. **Risks to watch.** Event schema drift (mitigated by contract tests), distributed data inconsistency (reconciliation job and strict single-writer rules), outbox backlog growth (metric and alert), poison messages (retries then DLQ), shared MySQL instance in development hiding schema isolation mistakes (each service uses its own credentials restricted to its schema), over-sharing code through the common starter (review gate: no domain code allowed).
+
+75. **How to use this document with an AI coding assistant.** Work one roadmap step at a time (items 59–72). For each step give the assistant this document, the target service name, and the exact items to implement (for example "build inventory-service following items 3, 7, 16, 22–29, 33–40 and 49"). Ask for migrations, code, tests and README together, run the exit check, and only then move to the next step.
+</USER_REQUEST>
+<ADDITIONAL_METADATA>
+The current local time is: 2026-11-23T21:00:40+05:30.
+</ADDITIONAL_METADATA>
+<USER_SETTINGS_CHANGE>
+The user changed setting `Model Selection` from None to Gemini 3.8 Flash (High). No need to comment on this change if the user doesn't ask about it. If reporting what model you are, please use a human readable name instead of the exact string.
+</USER_SETTINGS_CHANGE>

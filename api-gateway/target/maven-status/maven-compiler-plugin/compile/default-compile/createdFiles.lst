@@ -1,0 +1,4 @@
+com\infy\scm360\gateway\ApiGatewayApplication.class
+com\infy\scm360\gateway\controller\FallbackController.class
+com\infy\scm360\gateway\filter\JwtAuthenticationGatewayFilter.class
+com\infy\scm360\gateway\filter\SecurityHeadersFilter.class

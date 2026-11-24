@@ -1,0 +1,13 @@
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\CatalogServiceApplication.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\controller\CategoryController.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\controller\ProductController.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\domain\Category.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\domain\Product.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\dto\CategoryDto.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\dto\CreateProductRequest.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\dto\ProductDto.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\dto\UpdateProductRequest.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\repository\CategoryRepository.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\repository\ProductRepository.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\service\CategoryService.java
+C:\Users\User\Desktop\project\services\catalog-service\src\main\java\com\infy\scm360\catalog\service\ProductService.java

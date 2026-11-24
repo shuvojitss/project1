@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrderPlacedEvent",
+  "type": "object",
+  "properties": {
+    "eventId": { "type": "string", "format": "uuid" },
+    "eventType": { "type": "string", "enum": ["order.order.created"] },
+    "sourceService": { "type": "string", "enum": ["order-service"] },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "correlationId": { "type": "string" },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "orderId": { "type": "string", "format": "uuid" },
+        "orderNumber": { "type": "string" },
+        "customerId": { "type": "string" },
+        "warehouseId": { "type": "string" },
+        "totalAmount": { "type": "number", "minimum": 0 },
+        "lines": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "productId": { "type": "string" },
+              "quantity": { "type": "integer", "minimum": 1 },
+              "unitPrice": { "type": "number" }
+            },
+            "required": ["productId", "quantity", "unitPrice"]
+          }
+        }
+      },
+      "required": ["orderId", "orderNumber", "warehouseId", "totalAmount", "lines"]
+    }
+  },
+  "required": ["eventId", "eventType", "sourceService", "occurredAt", "correlationId", "payload"]
+}
