@@ -117,6 +117,7 @@ Open **`http://localhost:3000`** in your browser.
 ---
 
 ## 5. Documentation Deliverables Index
+- [Microservices Architecture, Tables & Communication Reference](file:///MICROSERVICES_ARCHITECTURE_REFERENCE.md)
 - [System Architecture](file:///docs/architecture.md)
 - [Operations & Reliability Runbook](file:///docs/runbook.md)
 - [Role-Based User Guide](file:///docs/user-guide.md)
